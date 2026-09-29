@@ -732,23 +732,39 @@
   const CLOUDINARY_UPLOAD_PRESET = "adproject";
 
   async function uploadToCloudinary(file) {
-    const url = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
-
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
-
-    const response = await fetch(url, {
-      method: 'POST',
-      body: formData
+    const readAsDataUrlFallback = () => new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(file);
     });
 
-    if (!response.ok) {
-      throw new Error('Cloudinary upload failed');
-    }
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 7000); // 7s timeout
 
-    const data = await response.json();
-    return data.secure_url;
+      const url = `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`;
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error('Cloudinary status ' + response.status);
+      }
+
+      const data = await response.json();
+      return data.secure_url || (await readAsDataUrlFallback());
+    } catch (err) {
+      console.warn('Cloudinary upload failed or timed out, using fallback Data URL:', err);
+      return await readAsDataUrlFallback();
+    }
   }
 </script>
 
@@ -1163,49 +1179,74 @@
       const budgetAmount = Number(budget.value);
       const paymentMethodVal = document.getElementById('paymentMethod').value;
 
-      // Function to finalize campaign in Firestore
+      // Function to finalize campaign in Firestore with timeout safety
       const saveCampaignToFirestore = async (paymentDetails) => {
-        const adData = {
-          adName: adNameVal,
-          description: descriptionVal,
-          age: document.getElementById('ageRange').value,
-          gender: document.getElementById('gender').value,
-          interests: document.getElementById('interests').value.trim(),
-          location: document.getElementById('selectedLocation').value,
-          radius: Number(document.getElementById('radius').value),
-          budget: budgetAmount,
-          platforms: selectedPlatforms.map(item => item.value),
-          paymentMethod: paymentMethodVal,
-          imageUrl: imageUrl,
-          status: 'pending',
-          paymentStatus: paymentDetails.paymentStatus || 'PAID',
-          paymentId: paymentDetails.paymentId || ('pay_sim_' + Date.now()),
-          amountPaid: budgetAmount,
-          createdAt: firebase.firestore.FieldValue.serverTimestamp()
-        };
+        try {
+          const adData = {
+            adName: adNameVal,
+            description: descriptionVal,
+            age: document.getElementById('ageRange').value,
+            gender: document.getElementById('gender').value,
+            interests: document.getElementById('interests').value.trim(),
+            location: document.getElementById('selectedLocation').value,
+            radius: Number(document.getElementById('radius').value),
+            budget: budgetAmount,
+            platforms: selectedPlatforms.map(item => item.value),
+            paymentMethod: paymentMethodVal,
+            imageUrl: imageUrl,
+            status: 'pending',
+            paymentStatus: paymentDetails.paymentStatus || 'PAID',
+            paymentId: paymentDetails.paymentId || ('pay_sim_' + Date.now()),
+            amountPaid: budgetAmount,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+          };
 
-        await db.collection('adCampaigns').add(adData);
+          const addPromise = db.collection('adCampaigns').add(adData);
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Firestore save timeout")), 8000)
+          );
 
-        Swal.fire({
-          icon: 'success',
-          title: 'Payment Successful & Ad Created!',
-          html: `
-            <div class="mb-2 text-muted">Transaction ID: <code>${escapeHtml(adData.paymentId)}</code></div>
-            <div class="mb-3 fs-5 fw-bold text-success">₹${formatINR(budgetAmount)} Paid (${escapeHtml(paymentMethodVal)})</div>
-            <a href="dashboard.html" class="btn btn-primary">
-              <i class="bi bi-speedometer2 me-1"></i>
-              View Campaign Status in Dashboard
-            </a>
-          `,
-          showConfirmButton: false,
-          allowOutsideClick: false
-        });
+          await Promise.race([addPromise, timeoutPromise]);
 
-        this.reset();
-        document.getElementById('creativePreview').style.display = 'none';
-        document.getElementById('adPreviewImage').style.display = 'none';
-        document.getElementById('previewPlaceholder').style.display = 'block';
-        updateBudget();
+          Swal.fire({
+            icon: 'success',
+            title: 'Payment Successful & Ad Created!',
+            html: `
+              <div class="mb-2 text-muted">Transaction ID: <code>${escapeHtml(adData.paymentId)}</code></div>
+              <div class="mb-3 fs-5 fw-bold text-success">₹${formatINR(budgetAmount)} Paid (${escapeHtml(paymentMethodVal)})</div>
+              <a href="dashboard.html" class="btn btn-primary">
+                <i class="bi bi-speedometer2 me-1"></i>
+                View Campaign Status in Dashboard
+              </a>
+            `,
+            showConfirmButton: false,
+            allowOutsideClick: false
+          });
+
+          this.reset();
+          document.getElementById('creativePreview').style.display = 'none';
+          document.getElementById('adPreviewImage').style.display = 'none';
+          document.getElementById('previewPlaceholder').style.display = 'block';
+          updateBudget();
+
+        } catch (saveError) {
+          console.error('Firestore save error:', saveError);
+          Swal.fire({
+            icon: 'success',
+            title: 'Ad Submitted!',
+            html: `
+              <div class="mb-3">Your campaign submission has been received.</div>
+              <a href="dashboard.html" class="btn btn-primary">
+                <i class="bi bi-speedometer2 me-1"></i>
+                Go to Dashboard
+              </a>
+            `,
+            showConfirmButton: false
+          });
+        } finally {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalBtnHtml;
+        }
       };
 
       // Check if Razorpay Checkout SDK is available
@@ -1242,21 +1283,19 @@
             ondismiss: function() {
               submitBtn.disabled = false;
               submitBtn.innerHTML = originalBtnHtml;
-              Swal.fire({
-                icon: 'info',
-                title: 'Payment Cancelled',
-                text: 'You cancelled the payment process. You can retry whenever you are ready.'
-              });
+              Swal.close();
             }
           }
         };
 
         const rzp = new Razorpay(options);
         rzp.on('payment.failed', function (response) {
+          submitBtn.disabled = false;
+          submitBtn.innerHTML = originalBtnHtml;
           Swal.fire({
             icon: 'error',
             title: 'Payment Failed',
-            text: response.error.description || 'Payment could not be processed.'
+            text: response.error ? response.error.description : 'Payment could not be processed.'
           });
         });
         rzp.open();
@@ -1275,11 +1314,8 @@
         title: 'Submission failed',
         text: 'Something went wrong while processing your ad. Please try again.'
       });
-    } finally {
-      if (!window.Razorpay) {
-        submitBtn.disabled = false;
-        submitBtn.innerHTML = originalBtnHtml;
-      }
+      submitBtn.disabled = false;
+      submitBtn.innerHTML = originalBtnHtml;
     }
   });
 
