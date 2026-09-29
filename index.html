@@ -28,7 +28,7 @@
   <!-- SweetAlert2 -->
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
-  <!-- Razorpay Payment Gateway SDK -->
+  <!-- Optional Razorpay Payment Gateway SDK -->
   <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 
   <style>
@@ -726,8 +726,9 @@
   // =========================
   // PAYMENT GATEWAY & CLOUDINARY CONFIG
   // =========================
-  // ⚠️ Replace RAZORPAY_KEY_ID with your Key ID from Razorpay Dashboard (https://dashboard.razorpay.com)
-  const RAZORPAY_KEY_ID = "rzp_test_adManagerDemoKey";
+  // ⚠️ Set your valid Razorpay Key ID here (e.g. "rzp_live_xxx" or "rzp_test_xxx").
+  // If left as "" or "YOUR_RAZORPAY_KEY_ID", the app uses the built-in interactive payment gateway modal.
+  const RAZORPAY_KEY_ID = "";
 
   // Cloudinary Config
   const CLOUDINARY_CLOUD_NAME = "y6kr5fnv";
@@ -1317,50 +1318,61 @@
         }
       };
 
-      // Check if Razorpay Checkout SDK is available and has a custom key configured
-      if (window.Razorpay && RAZORPAY_KEY_ID && !RAZORPAY_KEY_ID.includes("DemoKey")) {
-        Swal.close();
-        const options = {
-          key: RAZORPAY_KEY_ID,
-          amount: budgetAmount * 100, // Amount in paise
-          currency: "INR",
-          name: "Ad Manager Gateway",
-          description: "Ad Campaign: " + adNameVal,
-          image: "icons/icon-192.png",
-          handler: async function (response) {
-            Swal.fire({
-              title: 'Completing campaign setup...',
-              allowOutsideClick: false,
-              didOpen: () => Swal.showLoading()
-            });
-            await saveCampaignToFirestore({
-              paymentId: response.razorpay_payment_id,
-              paymentStatus: 'PAID'
-            });
-          },
-          prefill: {
-            name: adNameVal,
-          },
-          theme: {
-            color: "#0d6efd"
-          },
-          modal: {
-            ondismiss: function() {
-              submitBtn.disabled = false;
-              submitBtn.innerHTML = originalBtnHtml;
-              Swal.close();
-            }
-          }
-        };
+      // Check if a valid, real Razorpay Key ID is configured
+      const hasValidRazorpayKey = window.Razorpay &&
+        RAZORPAY_KEY_ID &&
+        RAZORPAY_KEY_ID.trim() !== "" &&
+        !RAZORPAY_KEY_ID.includes("YOUR_") &&
+        !RAZORPAY_KEY_ID.includes("DemoKey");
 
-        const rzp = new Razorpay(options);
-        rzp.on('payment.failed', function (response) {
-          console.warn('Razorpay SDK payment failed, opening interactive payment gateway:', response);
-          triggerInteractivePaymentModal();
-        });
-        rzp.open();
+      if (hasValidRazorpayKey) {
+        Swal.close();
+        try {
+          const options = {
+            key: RAZORPAY_KEY_ID.trim(),
+            amount: budgetAmount * 100, // Amount in paise
+            currency: "INR",
+            name: "Ad Manager Gateway",
+            description: "Ad Campaign: " + adNameVal,
+            image: "icons/icon-192.png",
+            handler: async function (response) {
+              Swal.fire({
+                title: 'Completing campaign setup...',
+                allowOutsideClick: false,
+                didOpen: () => Swal.showLoading()
+              });
+              await saveCampaignToFirestore({
+                paymentId: response.razorpay_payment_id,
+                paymentStatus: 'PAID'
+              });
+            },
+            prefill: {
+              name: adNameVal,
+            },
+            theme: {
+              color: "#0d6efd"
+            },
+            modal: {
+              ondismiss: function() {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = originalBtnHtml;
+                Swal.close();
+              }
+            }
+          };
+
+          const rzp = new Razorpay(options);
+          rzp.on('payment.failed', function (response) {
+            console.warn('Razorpay SDK payment failed:', response);
+            triggerInteractivePaymentModal();
+          });
+          rzp.open();
+        } catch (rzpErr) {
+          console.warn('Razorpay initialization exception:', rzpErr);
+          await triggerInteractivePaymentModal();
+        }
       } else {
-        // Fallback to rich interactive payment gateway modal
+        // Use built-in payment gateway modal directly
         await triggerInteractivePaymentModal();
       }
 
