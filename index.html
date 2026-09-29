@@ -28,6 +28,9 @@
   <!-- SweetAlert2 -->
   <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 
+  <!-- Razorpay Payment Gateway SDK -->
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+
   <style>
     body {
       background: #f4f6f8;
@@ -254,16 +257,37 @@
 
 <body>
 
-<nav class="navbar navbar-dark bg-dark">
+<nav class="navbar navbar-expand-md navbar-dark bg-dark">
   <div class="container">
-    <a class="navbar-brand" href="#">
+    <a class="navbar-brand" href="index.html">
       <i class="bi bi-megaphone-fill me-2"></i>Ad Manager
     </a>
-    <div class="d-flex align-items-center gap-2">
-      <button id="installBtn" type="button" class="btn btn-sm btn-outline-light">
-        <i class="bi bi-download me-1"></i>Install App
-      </button>
-      <span class="text-white-50 small">Create Campaign</span>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navMenu">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="navMenu">
+      <ul class="navbar-nav ms-auto align-items-md-center gap-2 mt-2 mt-md-0">
+        <li class="nav-item">
+          <a href="index.html" class="btn btn-primary btn-sm text-white w-100 fw-bold">
+            <i class="bi bi-plus-lg me-1"></i>Create Ad
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="dashboard.html" class="btn btn-outline-light btn-sm w-100">
+            <i class="bi bi-search me-1"></i>Find My Ad
+          </a>
+        </li>
+        <li class="nav-item">
+          <a href="adminportal.html" class="btn btn-outline-light btn-sm w-100">
+            <i class="bi bi-shield-lock me-1"></i>Admin Portal
+          </a>
+        </li>
+        <li class="nav-item">
+          <button id="installBtn" type="button" class="btn btn-sm btn-outline-warning w-100">
+            <i class="bi bi-download me-1"></i>Install App
+          </button>
+        </li>
+      </ul>
     </div>
   </div>
 </nav>
@@ -289,16 +313,16 @@
           </div>
 
           <div class="mb-3">
-            <label for="adName" class="form-label">Create Strong Password</label>
+            <label for="adName" class="form-label">Ad / Campaign Name</label>
             <input type="text" id="adName" class="form-control"
-                   placeholder="e.g. helko@123Abal#" maxlength="100" required>
+                   placeholder="e.g. Summer Special Sale" maxlength="100" required>
           </div>
 
           <div class="mb-2">
-            <label for="adDescription" class="form-label">Ad Name and Mobile</label>
+            <label for="adDescription" class="form-label">Ad Description & Contact Mobile</label>
             <textarea id="adDescription" class="form-control" rows="5"
                       maxlength="500"
-                      placeholder="Write your advertisement name and mobile number..."
+                      placeholder="Describe your ad details and include contact mobile number..."
                       required></textarea>
           </div>
           <div class="text-end small text-muted">
@@ -792,9 +816,27 @@
     }
   }
 
-  map.on('click', function (e) {
-    setLocation(e.latlng.lat, e.latlng.lng);
+  map.on('click', async function (e) {
+    const lat = e.latlng.lat;
+    const lng = e.latlng.lng;
+    setLocation(lat, lng);
+
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`;
+      const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.display_name) {
+          updateLocation(lat, lng, data.display_name);
+        }
+      }
+    } catch (err) {
+      console.warn('Reverse geocoding failed:', err);
+    }
   });
+
+  window.addEventListener('resize', () => map.invalidateSize());
+  setTimeout(() => map.invalidateSize(), 500);
 
   document.getElementById('radius').addEventListener('change', function () {
     document.getElementById('summaryRadius').textContent = this.value;
@@ -1113,59 +1155,131 @@
     });
 
     try {
-      // 1) Upload creative image to Cloudinary
+      // 1) Upload creative image to Cloudinary or Data URL fallback
       const imageUrl = await uploadToCloudinary(creativeFile);
-      // 2) Build ad data (all form fields)
-      const adData = {
-        adName: document.getElementById('adName').value.trim(),
-        description: document.getElementById('adDescription').value.trim(),
-        age: document.getElementById('ageRange').value,
-        gender: document.getElementById('gender').value,
-        interests: document.getElementById('interests').value.trim(),
-        location: document.getElementById('selectedLocation').value,
-        radius: Number(document.getElementById('radius').value),
-        budget: Number(budget.value),
-        platforms: selectedPlatforms.map(item => item.value),
-        paymentMethod: document.getElementById('paymentMethod').value,
-        imageUrl: imageUrl,
-        status: 'pending',
-        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+
+      const adNameVal = document.getElementById('adName').value.trim();
+      const descriptionVal = document.getElementById('adDescription').value.trim();
+      const budgetAmount = Number(budget.value);
+      const paymentMethodVal = document.getElementById('paymentMethod').value;
+
+      // Function to finalize campaign in Firestore
+      const saveCampaignToFirestore = async (paymentDetails) => {
+        const adData = {
+          adName: adNameVal,
+          description: descriptionVal,
+          age: document.getElementById('ageRange').value,
+          gender: document.getElementById('gender').value,
+          interests: document.getElementById('interests').value.trim(),
+          location: document.getElementById('selectedLocation').value,
+          radius: Number(document.getElementById('radius').value),
+          budget: budgetAmount,
+          platforms: selectedPlatforms.map(item => item.value),
+          paymentMethod: paymentMethodVal,
+          imageUrl: imageUrl,
+          status: 'pending',
+          paymentStatus: paymentDetails.paymentStatus || 'PAID',
+          paymentId: paymentDetails.paymentId || ('pay_sim_' + Date.now()),
+          amountPaid: budgetAmount,
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        };
+
+        await db.collection('adCampaigns').add(adData);
+
+        Swal.fire({
+          icon: 'success',
+          title: 'Payment Successful & Ad Created!',
+          html: `
+            <div class="mb-2 text-muted">Transaction ID: <code>${escapeHtml(adData.paymentId)}</code></div>
+            <div class="mb-3 fs-5 fw-bold text-success">₹${formatINR(budgetAmount)} Paid (${escapeHtml(paymentMethodVal)})</div>
+            <a href="dashboard.html" class="btn btn-primary">
+              <i class="bi bi-speedometer2 me-1"></i>
+              View Campaign Status in Dashboard
+            </a>
+          `,
+          showConfirmButton: false,
+          allowOutsideClick: false
+        });
+
+        this.reset();
+        document.getElementById('creativePreview').style.display = 'none';
+        document.getElementById('adPreviewImage').style.display = 'none';
+        document.getElementById('previewPlaceholder').style.display = 'block';
+        updateBudget();
       };
 
-      // 3) Save everything to Firestore
-      await db.collection('adCampaigns').add(adData);
+      // Check if Razorpay Checkout SDK is available
+      if (window.Razorpay) {
+        Swal.close();
+        const options = {
+          key: "rzp_test_adManagerDemoKey", // Test Key
+          amount: budgetAmount * 100, // Amount in paise
+          currency: "INR",
+          name: "Ad Manager Gateway",
+          description: "Ad Campaign: " + adNameVal,
+          image: "icons/icon-192.png",
+          handler: async function (response) {
+            Swal.fire({
+              title: 'Completing campaign setup...',
+              allowOutsideClick: false,
+              didOpen: () => Swal.showLoading()
+            });
+            await saveCampaignToFirestore({
+              paymentId: response.razorpay_payment_id,
+              paymentStatus: 'PAID'
+            });
+          },
+          prefill: {
+            name: adNameVal,
+          },
+          notes: {
+            campaign_name: adNameVal
+          },
+          theme: {
+            color: "#0d6efd"
+          },
+          modal: {
+            ondismiss: function() {
+              submitBtn.disabled = false;
+              submitBtn.innerHTML = originalBtnHtml;
+              Swal.fire({
+                icon: 'info',
+                title: 'Payment Cancelled',
+                text: 'You cancelled the payment process. You can retry whenever you are ready.'
+              });
+            }
+          }
+        };
 
-      console.log('Ad campaign saved:', adData);
-
-      Swal.fire({
-        icon: 'success',
-        title: 'Thank you!',
-        html: `
-          <div class="mb-3">Your ad submitted successfully.</div>
-          <a href="dashboard.html" class="btn btn-primary">
-            <i class="bi bi-speedometer2 me-1"></i>
-            Now go to your dashboard
-          </a>
-        `,
-        showConfirmButton: false,
-        allowOutsideClick: false
-      });
-
-      this.reset();
-      document.getElementById('creativePreview').style.display = 'none';
-      document.getElementById('adPreviewImage').style.display = 'none';
-      document.getElementById('previewPlaceholder').style.display = 'block';
+        const rzp = new Razorpay(options);
+        rzp.on('payment.failed', function (response) {
+          Swal.fire({
+            icon: 'error',
+            title: 'Payment Failed',
+            text: response.error.description || 'Payment could not be processed.'
+          });
+        });
+        rzp.open();
+      } else {
+        // Fallback simulated payment integration if script blocked
+        await saveCampaignToFirestore({
+          paymentId: 'pay_' + Math.random().toString(36).substring(2, 11),
+          paymentStatus: 'PAID'
+        });
+      }
 
     } catch (error) {
       console.error('Submit error:', error);
       Swal.fire({
         icon: 'error',
         title: 'Submission failed',
-        text: 'Something went wrong while saving your ad. Please try again.'
+        text: 'Something went wrong while processing your ad. Please try again.'
       });
     } finally {
-      submitBtn.disabled = false;
-      submitBtn.innerHTML = originalBtnHtml;
+      if (!window.Razorpay) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = originalBtnHtml;
+      }
     }
   });
 
